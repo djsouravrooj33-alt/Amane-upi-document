@@ -18,7 +18,7 @@ tg_app = (
     Application
     .builder()
     .token(BOT_TOKEN)
-    .updater(None)          # ✅ webhook-only mode
+    .updater(None)  # webhook-only
     .build()
 )
 
@@ -33,7 +33,7 @@ def is_authorized(update: Update) -> bool:
         return True
     return False
 
-# ========= UPI DATA =========
+# ========= UPI =========
 UPI_REGEX = re.compile(r"^[\w.\-]{2,256}@[a-zA-Z]{2,64}$")
 
 UPI_BANK_IFSC = {
@@ -45,12 +45,15 @@ UPI_BANK_IFSC = {
     "paytm": ("Paytm Payments Bank", "PYTM0000001"),
 }
 
-# ========= IFSC LOOKUP =========
+# ========= IFSC =========
 def get_ifsc_info(ifsc: str):
-    r = requests.get(f"https://ifsc.razorpay.com/{ifsc}", timeout=10)
-    if r.status_code != 200:
+    try:
+        r = requests.get(f"https://ifsc.razorpay.com/{ifsc}", timeout=10)
+        if r.status_code != 200:
+            return None
+        return r.json()
+    except:
         return None
-    return r.json()
 
 # ========= COMMAND =========
 async def upi_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -85,13 +88,13 @@ async def upi_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔎 UPI: `{upi}`\n"
         f"🏦 Bank: {bank}\n"
         f"🏧 IFSC: {ifsc}\n"
-        f"🏢 Branch: {info['BRANCH']}\n"
-        f"📍 City: {info['CITY']}\n"
-        f"🗺 State: {info['STATE']}",
+        f"🏢 Branch: {info.get('BRANCH')}\n"
+        f"📍 City: {info.get('CITY')}\n"
+        f"🗺 State: {info.get('STATE')}",
         parse_mode="Markdown"
     )
 
-# ========= FLASK WEBHOOK =========
+# ========= WEBHOOK =========
 @app.route("/", methods=["POST"])
 def webhook():
     data = request.get_json(force=True)
@@ -107,12 +110,14 @@ def health():
 async def startup():
     tg_app.add_handler(CommandHandler("upi", upi_cmd))
 
-    # ✅ Clean previous webhook
+    await tg_app.initialize()
+    await tg_app.start()
+
     await tg_app.bot.delete_webhook(drop_pending_updates=True)
 
     webhook_url = os.environ.get("RENDER_EXTERNAL_URL")
     if webhook_url:
-        await tg_app.bot.set_webhook(webhook_url)
+        await tg_app.bot.set_webhook(webhook_url + "/")
 
 # ========= MAIN =========
 if __name__ == "__main__":
