@@ -5,11 +5,12 @@ import aiohttp
 from flask import Flask
 from threading import Thread
 
-from telegram import Update
+from telegram import Update, ParseMode
 from telegram.ext import (
-    Application,
+    Updater,
     CommandHandler,
-    ContextTypes
+    CallbackContext,
+    Dispatcher
 )
 
 # ================= CONFIG =================
@@ -19,7 +20,6 @@ if not BOT_TOKEN:
 
 GROUP_ID = -1003296016362
 OWNER_ID = 8145485145
-CHANNEL_USERNAME = "@amane_friends"
 API_BY = "@amane_friends"
 
 AUTH_FILE = "authorized_users.json"
@@ -61,7 +61,7 @@ def is_authorized(update: Update) -> bool:
     return uid == OWNER_ID or uid in AUTHORIZED_USERS
 
 # ================= GROUP ONLY =================
-async def group_only(update: Update) -> bool:
+def group_only(update: Update) -> bool:
     chat = update.effective_chat
     return chat and chat.id == GROUP_ID
 
@@ -96,200 +96,191 @@ async def fallback_upi_lookup(bankcode: str):
 
 # ================= IFSC API =================
 async def fetch_ifsc_info(code: str):
-    """Fetch IFSC info from dual API sources"""
-    
-    # Try primary API (datayuge)
-    try:
-        url = f"https://ifsc.datayuge.com/?code={code}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=8) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if data.get('status') and data.get('data'):
-                        return {'source': 'datayuge', 'data': data['data']}
-    except:
-        pass
-    
-    # Try backup API (razorpay)
     try:
         url = f"https://ifsc.razorpay.com/{code}"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=8) as response:
                 if response.status == 200:
-                    data = await response.json()
-                    return {'source': 'razorpay', 'data': data}
+                    return await response.json()
     except:
         pass
-    
     return None
 
 # ================= COMMANDS =================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await group_only(update):
+def start(update: Update, context: CallbackContext):
+    if not group_only(update):
         return
     if not is_authorized(update):
-        await update.message.reply_text("❌ You are not authorized")
+        update.message.reply_text("❌ You are not authorized")
         return
     
-    await update.message.reply_text(
+    update.message.reply_text(
         "🤖 *Bot Ready!*\n\n"
         "💳 `/upi username@bank` - UPI info\n"
         "🏦 `/ifsc SBIN0001234` - IFSC info\n\n"
-        "👑 Owner commands:\n"
+        "👑 *Owner Commands:*\n"
         "`/adduser ID` - Add user\n"
         "`/removeuser ID` - Remove user\n"
         "`/listusers` - List users\n\n"
         f"⚡ API BY {API_BY}",
-        parse_mode="Markdown"
+        parse_mode=ParseMode.MARKDOWN
     )
 
 # ---------- OWNER COMMANDS ----------
-async def adduser(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def adduser(update: Update, context: CallbackContext):
     if update.effective_user.id != OWNER_ID:
         return
-    uid = int(context.args[0])
-    AUTHORIZED_USERS.add(uid)
-    save_users(AUTHORIZED_USERS)
-    await update.message.reply_text(f"✅ Added `{uid}`", parse_mode="Markdown")
+    if not context.args:
+        update.message.reply_text("Usage: /adduser 123456789")
+        return
+    try:
+        uid = int(context.args[0])
+        AUTHORIZED_USERS.add(uid)
+        save_users(AUTHORIZED_USERS)
+        update.message.reply_text(f"✅ Added `{uid}`", parse_mode=ParseMode.MARKDOWN)
+    except:
+        update.message.reply_text("❌ Invalid ID")
 
-async def removeuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def removeuser(update: Update, context: CallbackContext):
     if update.effective_user.id != OWNER_ID:
         return
-    uid = int(context.args[0])
-    AUTHORIZED_USERS.discard(uid)
-    save_users(AUTHORIZED_USERS)
-    await update.message.reply_text(f"❌ Removed `{uid}`", parse_mode="Markdown")
+    if not context.args:
+        update.message.reply_text("Usage: /removeuser 123456789")
+        return
+    try:
+        uid = int(context.args[0])
+        AUTHORIZED_USERS.discard(uid)
+        save_users(AUTHORIZED_USERS)
+        update.message.reply_text(f"❌ Removed `{uid}`", parse_mode=ParseMode.MARKDOWN)
+    except:
+        update.message.reply_text("❌ Invalid ID")
 
-async def listusers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def listusers(update: Update, context: CallbackContext):
     if update.effective_user.id != OWNER_ID:
         return
-    text = "\n".join(map(str, AUTHORIZED_USERS)) or "No users"
-    await update.message.reply_text(text)
+    if not AUTHORIZED_USERS:
+        update.message.reply_text("📭 No authorized users")
+        return
+    text = "\n".join([f"• `{uid}`" for uid in AUTHORIZED_USERS])
+    update.message.reply_text(
+        f"📋 *Authorized Users:*\n{text}",
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 # ---------- UPI COMMAND ----------
-async def upi(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await group_only(update):
+def upi(update: Update, context: CallbackContext):
+    if not group_only(update):
         return
     if not is_authorized(update):
-        await update.message.reply_text("❌ Not authorized")
+        update.message.reply_text("❌ Not authorized")
         return
 
     if not context.args:
-        await update.message.reply_text("Usage: /upi username@bank")
+        update.message.reply_text("Usage: /upi username@bank")
         return
 
     upi_id = context.args[0].lower()
 
     if not is_valid_upi(upi_id):
-        await update.message.reply_text("❌ Invalid UPI format")
+        update.message.reply_text("❌ Invalid UPI format")
         return
 
     _, bankcode = upi_id.split("@", 1)
 
     app_name = "Unknown"
-    ifsc_code = "Not available"
-    source = "Local map"
+    ifsc_code = "N/A"
+    source = "Local"
 
     if bankcode in UPI_BANK_MAP:
         app_name = UPI_BANK_MAP[bankcode]["app"]
         ifsc_code = UPI_BANK_MAP[bankcode]["ifsc"]
     else:
-        data = await fallback_upi_lookup(bankcode)
-        if data:
-            app_name = data.get("bank", "Unknown Bank")
-            ifsc_code = data.get("ifsc", "Not available")
-            source = "API fallback"
+        # Async call synchronously
+        import asyncio
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            data = loop.run_until_complete(fallback_upi_lookup(bankcode))
+            loop.close()
+            if data:
+                app_name = data.get("bank", "Unknown")
+                ifsc_code = data.get("ifsc", "N/A")
+                source = "API"
+        except:
+            pass
 
-    await update.message.reply_text(
-        "💳 *UPI ANALYSIS*\n"
+    update.message.reply_text(
+        "💳 *UPI DETAILS*\n"
         "━━━━━━━━━━━━━━━━\n"
-        f"📌 UPI ID: `{upi_id}`\n"
-        f"🏦 Bank/App: `{app_name}`\n"
+        f"📌 `{upi_id}`\n"
+        f"🏦 `{app_name}`\n"
         f"🏷 IFSC: `{ifsc_code}`\n"
         f"🔍 Source: `{source}`\n"
         "━━━━━━━━━━━━━━━━\n"
-        "⚠️ NPCI rule: Owner name not public\n"
-        f"⚡ API BY {API_BY}",
-        parse_mode="Markdown"
+        f"⚡ {API_BY}",
+        parse_mode=ParseMode.MARKDOWN
     )
 
 # ---------- IFSC COMMAND ----------
-async def ifsc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """IFSC code info command - Dual API"""
-    if not await group_only(update):
+def ifsc(update: Update, context: CallbackContext):
+    if not group_only(update):
         return
     if not is_authorized(update):
-        await update.message.reply_text("❌ Not authorized")
+        update.message.reply_text("❌ Not authorized")
         return
     
     if not context.args:
-        await update.message.reply_text(
-            "🏦 *Usage:* `/ifsc SBIN0001234`",
-            parse_mode="Markdown"
-        )
+        update.message.reply_text("Usage: /ifsc SBIN0001234")
         return
     
     code = context.args[0].upper()
-    msg = await update.message.reply_text(
-        "🔄 *Fetching IFSC information...*",
-        parse_mode="Markdown"
-    )
+    msg = update.message.reply_text("🔄 Fetching IFSC...")
     
-    result = await fetch_ifsc_info(code)
+    # Async call synchronously
+    import asyncio
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        data = loop.run_until_complete(fetch_ifsc_info(code))
+        loop.close()
+    except:
+        data = None
     
-    if not result:
-        await msg.edit_text(
-            "❌ *Invalid IFSC Code or API Error!*",
-            parse_mode="Markdown"
-        )
+    if not data:
+        msg.edit_text("❌ Invalid IFSC Code")
         return
     
-    # Format response based on source
-    if result['source'] == 'datayuge':
-        d = result['data']
-        text = (
-            "✅ *IFSC INFORMATION*\n"
-            "━━━━━━━━━━━━━━━━\n"
-            f"🏦 *Bank:* `{d.get('bank', 'N/A')}`\n"
-            f"📍 *Branch:* `{d.get('branch', 'N/A')}`\n"
-            f"🏙️ *City:* `{d.get('city', 'N/A')}`\n"
-            f"🏛️ *District:* `{d.get('district', 'N/A')}`\n"
-            f"🌍 *State:* `{d.get('state', 'N/A')}`\n"
-            f"📮 *Address:* `{d.get('address', 'N/A')[:100]}...`\n"
-            "━━━━━━━━━━━━━━━━\n"
-            f"⚡ API BY {API_BY}"
-        )
-    else:
-        d = result['data']
-        text = (
-            "✅ *IFSC INFORMATION*\n"
-            "━━━━━━━━━━━━━━━━\n"
-            f"🏦 *Bank:* `{d.get('BANK', 'N/A')}`\n"
-            f"📍 *Branch:* `{d.get('BRANCH', 'N/A')}`\n"
-            f"🏙️ *City:* `{d.get('CITY', 'N/A')}`\n"
-            f"🏛️ *District:* `{d.get('DISTRICT', 'N/A')}`\n"
-            f"🌍 *State:* `{d.get('STATE', 'N/A')}`\n"
-            f"📮 *Address:* `{d.get('ADDRESS', 'N/A')[:100]}...`\n"
-            "━━━━━━━━━━━━━━━━\n"
-            f"⚡ API BY {API_BY}"
-        )
+    text = (
+        "✅ *IFSC FOUND*\n"
+        "━━━━━━━━━━━━━━━━\n"
+        f"🏦 *Bank:* `{data.get('BANK', 'N/A')}`\n"
+        f"📍 *Branch:* `{data.get('BRANCH', 'N/A')}`\n"
+        f"🏙️ *City:* `{data.get('CITY', 'N/A')}`\n"
+        f"🌍 *State:* `{data.get('STATE', 'N/A')}`\n"
+        "━━━━━━━━━━━━━━━━\n"
+        f"⚡ {API_BY}"
+    )
     
-    await msg.edit_text(text, parse_mode="Markdown")
+    msg.edit_text(text, parse_mode=ParseMode.MARKDOWN)
 
 # ================= MAIN =================
 def main():
     keep_alive()
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("upi", upi))
-    app.add_handler(CommandHandler("ifsc", ifsc))
-    app.add_handler(CommandHandler("adduser", adduser))
-    app.add_handler(CommandHandler("removeuser", removeuser))
-    app.add_handler(CommandHandler("listusers", listusers))
-
-    print("✅ Bot started with UPI + IFSC features")
-    app.run_polling()
+    
+    # Updater ব্যবহার করে 13.15 ভার্সন
+    updater = Updater(token=BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
+    
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("upi", upi))
+    dp.add_handler(CommandHandler("ifsc", ifsc))
+    dp.add_handler(CommandHandler("adduser", adduser))
+    dp.add_handler(CommandHandler("removeuser", removeuser))
+    dp.add_handler(CommandHandler("listusers", listusers))
+    
+    print("✅ Bot Started with PTB 13.15")
+    updater.start_polling()
+    updater.idle()
 
 if __name__ == "__main__":
     main()
